@@ -1,4 +1,4 @@
-package server
+package server //GO-chat-simulator/server
 
 import (
 	"fmt"

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"GO-chat-simulator/models"
 )
 
 type Room struct {

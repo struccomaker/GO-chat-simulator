@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"strings"
+
+	"GO-chat-simulator/server"
 )
 
 func main() {
@@ -42,27 +44,54 @@ func runServer() {
 }
 
 func runClient() {
-	conn, err := net.Dial("tcp", "localhost:8080")
+	// get server address and port
+	fmt.Print("Enter server address and port (default localhost:8080): ")
+	scanner := bufio.NewScanner(os.Stdin)
+	address := "localhost:8080" // default
+	
+	if scanner.Scan() {
+		input := strings.TrimSpace(scanner.Text())
+		if input != "" {
+			address = input
+		}
+	}
+	
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		log.Fatal("Failed to connect to server:", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to chat server!")
-	fmt.Println("Commands: /list, /join <room>, /msg <message>, /quit")
+	// get username from user
+	fmt.Print("Enter your username: ")
+	if !scanner.Scan() {
+		log.Fatal("Failed to read username")
+	}
+	username := strings.TrimSpace(scanner.Text())
+	if username == "" {
+		username = "Anonymous"
+	}
+	
+	// send username to server
+	_, err = conn.Write([]byte("/setname " + username + "\n"))
+	if err != nil {
+		log.Fatal("Failed to send username:", err)
+	}
+
+	fmt.Printf("Connected to chat server as %s!\n", username)
+	fmt.Println("Commands: /list, /join <room>, /msg <username> <message>, /r <reply>, /quit")
 	fmt.Println("Start by typing /list to see available rooms")
 	fmt.Println()
 
-	// Start goroutine to read messages from server
+	// start goroutine to read messages from server
 	go func() {
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			fmt.Println(scanner.Text())
+		serverScanner := bufio.NewScanner(conn)
+		for serverScanner.Scan() {
+			fmt.Println(serverScanner.Text())
 		}
 	}()
 
-	// Read input from user and send to server
-	scanner := bufio.NewScanner(os.Stdin)
+	// read input from user and send to server
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {

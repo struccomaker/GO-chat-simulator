@@ -6,94 +6,108 @@ import (
 	"net"
 	"strings"
 	"sync"
+
+	"GO-chat-simulator/models"
 )
 
 type Server struct {
-	rooms   map[string]*Room
-	clients map[net.Conn]*Client
-	mutex   sync.RWMutex
+	rooms       map[string]*Room
+	clients     map[net.Conn]*Client
+	lastMessage map[string]*models.Message // Track last message per room
+	mutex       sync.RWMutex
 }
 
 func NewServer() *Server {
 	server := &Server{
-		rooms:   make(map[string]*Room),
-		clients: make(map[net.Conn]*Client),
+		rooms:       make(map[string]*Room),
+		clients:     make(map[net.Conn]*Client),
+		lastMessage: make(map[string]*models.Message),
 	}
-
-	// Create default rooms
+	
+	// create default rooms
 	server.createRoom("general")
 	server.createRoom("random")
 	server.createRoom("tech")
-
+	
 	return server
 }
 
 func (s *Server) HandleConnection(conn net.Conn) {
 	defer conn.Close()
-
-	// Create new client
+	
+	// create new client with temporary username
 	client := &Client{
 		conn:     conn,
 		username: fmt.Sprintf("User_%d", len(s.clients)+1),
 		room:     nil,
 	}
-
+	
 	s.mutex.Lock()
 	s.clients[conn] = client
 	s.mutex.Unlock()
-
+	
 	fmt.Printf("New client connected: %s\n", client.username)
-
-	// Send welcome message
-	welcome := fmt.Sprintf("Welcome %s! Type /list to see available rooms.", client.username)
-	client.send(welcome)
-
-	// Handle client messages
+	
+	// handle client messages
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		message := strings.TrimSpace(scanner.Text())
 		if message == "" {
 			continue
 		}
-
+		
 		s.processCommand(client, message)
 	}
-
-	// Client disconnected
+	
+	// client disconnected
 	s.removeClient(client)
 	fmt.Printf("Client disconnected: %s\n", client.username)
 }
 
 func (s *Server) processCommand(client *Client, input string) {
 	if !strings.HasPrefix(input, "/") {
-		client.send("Commands must start with /. Try /list, /join <room>, or /msg <message>")
+		client.send("Commands must start with /. Try /list, /join <room>, /msg <message>, or /r <reply>")
 		return
 	}
-
+	
 	parts := strings.SplitN(input, " ", 2)
 	command := parts[0]
-
+	
 	switch command {
+	case "/setname":
+		if len(parts) < 2 {
+			client.send("Usage: /setname <username>")
+			return
+		}
+		s.setUsername(client, parts[1])
+		
 	case "/list":
 		s.listRooms(client)
-
+		
 	case "/join":
 		if len(parts) < 2 {
 			client.send("Usage: /join <room_name>")
 			return
 		}
 		s.joinRoom(client, parts[1])
-
+		
 	case "/msg":
 		if len(parts) < 2 {
 			client.send("Usage: /msg <your_message>")
 			return
 		}
 		s.sendMessage(client, parts[1])
-
+		
+	case "/r":
+		if len(parts) < 2 {
+			client.send("Usage: /r <reply_message>")
+			return
+		}
+		s.replyToLast(client, parts[1])
+		
 	case "/users":
 		s.listUsersInRoom(client)
-
+		
 	case "/create":
 		if len(parts) < 2 {
 			client.send("Usage: /create <room_name>")
@@ -101,21 +115,31 @@ func (s *Server) processCommand(client *Client, input string) {
 		}
 		s.createRoom(parts[1])
 		client.send(fmt.Sprintf("Room '%s' created! Use /join %s to enter.", parts[1], parts[1]))
-
+		
 	default:
-		client.send("Unknown command. Available: /list, /join <room>, /msg <message>, /users, /create <room>")
+		client.send("Unknown command. Available: /list, /join <room>, /msg <message>, /r <reply>, /users, /create <room>")
 	}
+}
+
+func (s *Server) setUsername(client *Client, username string) {
+	oldName := client.username
+	client.username = username
+	
+	welcome := fmt.Sprintf("Welcome %s! Type /list to see available rooms.", client.username)
+	client.send(welcome)
+	
+	fmt.Printf("Client %s changed name to: %s\n", oldName, username)
 }
 
 func (s *Server) listRooms(client *Client) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-
+	
 	if len(s.rooms) == 0 {
 		client.send("No rooms available")
 		return
 	}
-
+	
 	client.send("Available rooms:")
 	for name, room := range s.rooms {
 		userCount := room.getUserCount()
@@ -126,7 +150,7 @@ func (s *Server) listRooms(client *Client) {
 func (s *Server) createRoom(name string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
+	
 	if _, exists := s.rooms[name]; !exists {
 		s.rooms[name] = NewRoom(name)
 	}
@@ -135,8 +159,8 @@ func (s *Server) createRoom(name string) {
 func (s *Server) joinRoom(client *Client, roomName string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
-	// Leave current room if in one
+	
+	// leave current room if in one
 	if client.room != nil {
 		client.room.removeClient(client)
 		client.room.broadcast(models.Message{
@@ -145,25 +169,25 @@ func (s *Server) joinRoom(client *Client, roomName string) {
 			Type:     models.SystemMessage,
 		}, nil)
 	}
-
-	// Join new room (create if doesn't exist)
+	
+	// join new room (create if doesn't exist)
 	room, exists := s.rooms[roomName]
 	if !exists {
 		room = NewRoom(roomName)
 		s.rooms[roomName] = room
 	}
-
+	
 	room.addClient(client)
 	client.room = room
-
+	
 	client.send(fmt.Sprintf("Joined room: %s", roomName))
-
-	// Announce to room
+	
+	// annouce to room
 	room.broadcast(models.Message{
 		Username: "System",
 		Content:  fmt.Sprintf("%s joined the room", client.username),
 		Type:     models.SystemMessage,
-	}, client) // Exclude the joining client
+	}, client) // exlcude the joining client
 }
 
 func (s *Server) sendMessage(client *Client, content string) {
@@ -171,13 +195,89 @@ func (s *Server) sendMessage(client *Client, content string) {
 		client.send("You must join a room first! Use /list to see available rooms.")
 		return
 	}
-
+	
 	message := models.Message{
 		Username: client.username,
 		Content:  content,
 		Type:     models.ChatMessage,
 	}
+	
+	// store as last message for this room
+	s.mutex.Lock()
+	s.lastMessage[client.room.name] = &message
+	s.mutex.Unlock()
+	
+	client.room.broadcast(message, nil)
+}
 
+func (s *Server) sendPrivateMessage(client *Client, input string) {
+	// parse: /msg username message content
+	parts := strings.SplitN(input, " ", 2)
+	if len(parts) < 2 {
+		client.send("Usage: /msg <username> <message>")
+		return
+	}
+	
+	targetUsername := parts[0]
+	messageContent := parts[1]
+	
+	// go run main.go clientnd target client
+	s.mutex.RLock()
+	var targetClient *Client
+	for _, c := range s.clients {
+		if c.username == targetUsername {
+			targetClient = c
+			break
+		}
+	}
+	s.mutex.RUnlock()
+	
+	if targetClient == nil {
+		client.send(fmt.Sprintf("User '%s' not found or not online", targetUsername))
+		return
+	}
+	
+	if targetClient == client {
+		client.send("You cannot send a private message to yourself!")
+		return
+	}
+	
+	// Send private message
+	privateMsg := fmt.Sprintf("[Private] %s: %s", client.username, messageContent)
+	targetClient.send(privateMsg)
+	
+	// go to sender
+	client.send(fmt.Sprintf("[Private to %s]: %s", targetUsername, messageContent))
+}
+
+func (s *Server) replyToLast(client *Client, reply string) {
+	if client.room == nil {
+		client.send("You must join a room first!")
+		return
+	}
+	
+	s.mutex.RLock()
+	lastMsg, exists := s.lastMessage[client.room.name]
+	s.mutex.RUnlock()
+	
+	if !exists || lastMsg == nil {
+		client.send("No previous message to reply to in this room.")
+		return
+	}
+	
+	// create reply message
+	replyContent := fmt.Sprintf("@%s %s", lastMsg.Username, reply)
+	message := models.Message{
+		Username: client.username,
+		Content:  replyContent,
+		Type:     models.ChatMessage,
+	}
+	
+	// Store as new last message
+	s.mutex.Lock()
+	s.lastMessage[client.room.name] = &message
+	s.mutex.Unlock()
+	
 	client.room.broadcast(message, nil)
 }
 
@@ -186,13 +286,13 @@ func (s *Server) listUsersInRoom(client *Client) {
 		client.send("You must join a room first!")
 		return
 	}
-
+	
 	users := client.room.getUsers()
 	if len(users) == 0 {
 		client.send("No users in this room")
 		return
 	}
-
+	
 	client.send(fmt.Sprintf("Users in %s:", client.room.name))
 	for _, username := range users {
 		if username == client.username {
@@ -206,8 +306,8 @@ func (s *Server) listUsersInRoom(client *Client) {
 func (s *Server) removeClient(client *Client) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
-	// Remove from room
+	
+	// rm from room
 	if client.room != nil {
 		client.room.removeClient(client)
 		client.room.broadcast(models.Message{
@@ -216,7 +316,7 @@ func (s *Server) removeClient(client *Client) {
 			Type:     models.SystemMessage,
 		}, nil)
 	}
-
-	// Remove from server
+	
+	// rm from server
 	delete(s.clients, client.conn)
 }
